@@ -2,7 +2,7 @@ import streamlit as st
 import fitz  # PyMuPDF
 import re
 import requests
-from bs4 import BeautifulSoup
+# from bs4 import BeautifulSoup   # ❌ Not used - removed
 import google.generativeai as genai
 import os
 from datetime import datetime
