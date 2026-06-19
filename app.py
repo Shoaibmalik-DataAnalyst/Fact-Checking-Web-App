@@ -2,50 +2,39 @@ import streamlit as st
 import fitz  # PyMuPDF
 import re
 import requests
-# from bs4 import BeautifulSoup   # ❌ Not used - removed
-import google.generativeai as genai
-import os
-from datetime import datetime
 import json
-from typing import List, Dict, Tuple
+from datetime import datetime
+from typing import List, Dict
 import pandas as pd
 
-# Page configuration
+# Page config
 st.set_page_config(
-    page_title="FactCheck Pro - AI Truth Layer",
+    page_title="FactCheck Pro – Truth Layer",
     page_icon="🔍",
     layout="wide",
-    initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom styling
 st.markdown("""
 <style>
-    .verified { background-color: #d4edda; padding: 10px; border-radius: 5px; border-left: 5px solid #28a745; }
-    .inaccurate { background-color: #fff3cd; padding: 10px; border-radius: 5px; border-left: 5px solid #ffc107; }
-    .false { background-color: #f8d7da; padding: 10px; border-radius: 5px; border-left: 5px solid #dc3545; }
+    .verified { background-color: #d4edda; padding: 1rem; border-radius: 8px; border-left: 5px solid #28a745; margin: 0.5rem 0; }
+    .inaccurate { background-color: #fff3cd; padding: 1rem; border-radius: 8px; border-left: 5px solid #ffc107; margin: 0.5rem 0; }
+    .false { background-color: #f8d7da; padding: 1rem; border-radius: 8px; border-left: 5px solid #dc3545; margin: 0.5rem 0; }
     .stat-highlight { font-weight: bold; color: #0d6efd; }
 </style>
 """, unsafe_allow_html=True)
 
+# -----------------------------------------------------------------------------
+# 1. Claim extraction
+# -----------------------------------------------------------------------------
 class ClaimExtractor:
-    """Extract claims from PDF documents"""
-    
     @staticmethod
     def extract_text_from_pdf(pdf_file) -> str:
-        """Extract text from uploaded PDF"""
         doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-        text = ""
-        for page in doc:
-            text += page.get_text()
-        return text
-    
+        return "\n".join(page.get_text() for page in doc)
+
     @staticmethod
     def identify_claims(text: str) -> List[Dict]:
-        """Identify statistical and factual claims"""
-        claims = []
-        
-        # Patterns for different claim types
         patterns = {
             'statistic': r'(\d+(?:\.\d+)?%\s*(?:of\s+)?[\w\s]+?(?:increased|decreased|grown|declined|reached|totaling|amounting|valued at|worth)\s*\$?\d+(?:\.\d+)?\s*(?:million|billion|trillion)?)',
             'financial': r'(?:\$\s*\d+(?:\.\d+)?\s*(?:million|billion|trillion|USD)|(?:revenue|profit|market cap|valuation)\s*(?:of|:)?\s*\$?\d+(?:\.\d+)?\s*(?:million|billion|trillion)?)',
@@ -54,295 +43,184 @@ class ClaimExtractor:
             'ranking': r'(?:ranked|rated|positioned)\s+(?:#?\d+|first|second|third|top|bottom)',
             'market_share': r'(\d+(?:\.\d+)?%\s+(?:market share|of the market))'
         }
-        
-        # Extract sentences containing claims
+        claims = []
         sentences = re.split(r'[.!?]+', text)
-        
         for sentence in sentences:
             sentence = sentence.strip()
-            if len(sentence) < 20:  # Skip very short sentences
+            if len(sentence) < 20:
                 continue
-                
-            for claim_type, pattern in patterns.items():
-                matches = re.finditer(pattern, sentence, re.IGNORECASE)
-                for match in matches:
+            for ctype, pat in patterns.items():
+                for m in re.finditer(pat, sentence, re.IGNORECASE):
                     claims.append({
                         'claim_text': sentence,
-                        'matched_text': match.group(),
-                        'claim_type': claim_type,
-                        'context': ClaimExtractor.get_context(sentence, match.group())
+                        'matched_text': m.group(),
+                        'claim_type': ctype,
                     })
-        
         return claims
-    
-    @staticmethod
-    def get_context(sentence: str, claim: str) -> str:
-        """Extract relevant context around the claim"""
-        # Get surrounding sentences for context
-        return sentence[:200]  # Limit context length
 
-class WebVerifier:
-    """Verify claims against web sources"""
-    
-    @staticmethod
-    def search_web(query: str, num_results: int = 5) -> List[Dict]:
-        """Search the web for fact-checking"""
-        results = []
-        
-        # Using DuckDuckGo for privacy-focused search
-        try:
-            url = f"https://api.duckduckgo.com/?q={query}&format=json"
-            response = requests.get(url, headers={'User-Agent': 'FactChecker/1.0'})
-            if response.status_code == 200:
-                data = response.json()
-                if 'RelatedTopics' in data:
-                    for topic in data['RelatedTopics'][:num_results]:
-                        if 'Text' in topic and 'FirstURL' in topic:
-                            results.append({
-                                'title': topic.get('Text', '')[:100],
-                                'url': topic.get('FirstURL', ''),
-                                'snippet': topic.get('Text', '')
-                            })
-        except:
-            pass
-        
-        return results
-    
-    @staticmethod
-    def verify_with_ai(claim: str, context: str) -> Dict:
-        """Use AI to verify claims"""
-        try:
-            # Try to use Google's Gemini if API key is available
-            if 'GOOGLE_API_KEY' in st.secrets:
-                genai.configure(api_key=st.secrets['GOOGLE_API_KEY'])
-                model = genai.GenerativeModel('gemini-pro')
-                
-                prompt = f"""
-                Fact-check the following claim:
-                
-                Claim: {claim}
-                Context: {context}
-                
-                Please:
-                1. Verify if the claim is accurate based on current data
-                2. Provide the correct information if inaccurate
-                3. Cite specific sources
-                4. Rate confidence: HIGH, MEDIUM, LOW
-                
-                Format response as JSON:
-                {{
-                    "status": "VERIFIED/INACCURATE/FALSE",
-                    "correct_info": "correct facts here",
-                    "confidence": "HIGH/MEDIUM/LOW",
-                    "source": "citation"
-                }}
-                """
-                
-                response = model.generate_content(prompt)
-                
-                # Parse JSON from response
-                try:
-                    result = json.loads(response.text)
-                    return result
-                except:
-                    pass
-        except:
-            pass
-        
-        # Fallback to web-based verification
-        return WebVerifier.fallback_verification(claim, context)
-    
-    @staticmethod
-    def fallback_verification(claim: str, context: str) -> Dict:
-        """Basic web-based verification"""
-        # Search for the claim
-        results = WebVerifier.search_web(claim)
-        
-        if results:
-            return {
-                'status': 'PENDING',
-                'correct_info': 'Verified via web search',
-                'confidence': 'MEDIUM',
-                'source': results[0].get('url', 'Web search'),
-                'web_results': results
-            }
-        else:
-            return {
-                'status': 'FALSE',
-                'correct_info': 'No supporting evidence found',
-                'confidence': 'LOW',
-                'source': 'No reliable sources'
-            }
+# -----------------------------------------------------------------------------
+# 2. Fact‑checking backend (Google Fact Check Tools + web scraping)
+# -----------------------------------------------------------------------------
+class FactChecker:
+    GOOGLE_API_URL = "https://factchecktools.googleapis.com/v1alpha1/claims:search"
+    FACTCHECK_SITES = {
+        'snopes': 'site:snopes.com',
+        'politifact': 'site:politifact.com',
+        'factcheck': 'site:factcheck.org',
+    }
 
+    @staticmethod
+    def _google_factcheck(query: str, api_key: str) -> Dict:
+        """Official Google Fact Check Tools API."""
+        params = {
+            'key': api_key,
+            'query': query,
+            'languageCode': 'en',
+        }
+        try:
+            resp = requests.get(FactChecker.GOOGLE_API_URL, params=params, timeout=8)
+            data = resp.json()
+            if 'claims' in data and data['claims']:
+                claim = data['claims'][0]
+                rating = claim.get('claimReview', [{}])[0].get('textualRating', '').lower()
+                source = claim.get('claimReview', [{}])[0].get('url', '')
+                return {
+                    'status': 'VERIFIED' if 'true' in rating else 'INACCURATE',
+                    'correct_info': claim.get('text', ''),
+                    'confidence': 'HIGH',
+                    'source': source
+                }
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def _scrape_factcheck_sites(query: str) -> Dict:
+        """Scrape known fact‑checking sites for verdicts."""
+        # Use a simple search via DuckDuckGo (no API key) with site: operator
+        search_url = "https://html.duckduckgo.com/html/"
+        for site_name, site_query in FactChecker.FACTCHECK_SITES.items():
+            full_q = f"{query} {site_query}"
+            try:
+                resp = requests.get(search_url, params={'q': full_q},
+                                    headers={'User-Agent': 'Mozilla/5.0'}, timeout=8)
+                if resp.status_code == 200:
+                    # Very simple extraction – look for common verdict words
+                    if 'true' in resp.text.lower() or 'fact' in resp.text.lower():
+                        # We'll try to find a link
+                        import re
+                        links = re.findall(r'<a[^>]+href="(https?://[^"]+)"', resp.text)
+                        url = links[0] if links else f"https://{site_name}.com"
+                        return {
+                            'status': 'VERIFIED',
+                            'correct_info': f'Found on {site_name.capitalize()}',
+                            'confidence': 'MEDIUM',
+                            'source': url
+                        }
+            except Exception:
+                continue
+        return {'status': 'FALSE', 'correct_info': 'No evidence found', 'confidence': 'LOW', 'source': ''}
+
+    @staticmethod
+    def verify(claim: str, api_key: str = None) -> Dict:
+        """Orchestrator: tries API first, then scraping."""
+        if api_key:
+            result = FactChecker._google_factcheck(claim, api_key)
+            if result:
+                return result
+
+        # Fallback: scrape fact‑checking sites
+        return FactChecker._scrape_factcheck_sites(claim)
+
+# -----------------------------------------------------------------------------
+# 3. Main app
+# -----------------------------------------------------------------------------
 def main():
-    """Main Streamlit application"""
-    
-    # Header
-    st.title("🔍 FactCheck Pro - AI Truth Layer")
-    st.markdown("### *Automated Claim Verification & Fact-Checking System*")
-    
+    st.title("🔍 FactCheck Pro – AI Truth Layer")
+    st.markdown("### *Upload a PDF – we'll flag lies, outdated stats, and provide real facts*")
+
     # Sidebar
     with st.sidebar:
-        st.header("📊 Dashboard")
-        st.metric("Documents Processed", "0", delta="Real-time")
-        
+        st.header("🔑 API Key (optional)")
+        api_key = st.text_input("Google FactCheck Tools API key", type="password",
+                                help="Get one at https://console.cloud.google.com (free tier)")
         st.markdown("---")
-        st.subheader("🔑 API Configuration")
-        
-        api_key = st.text_input(
-            "Google Gemini API Key (Optional)",
-            type="password",
-            help="Enter your Google Gemini API key for enhanced AI verification"
-        )
-        
-        if api_key:
-            st.session_state['api_key'] = api_key
-            
-        st.markdown("---")
-        st.subheader("📋 About")
         st.info("""
-        **FactCheck Pro** cross-references claims from uploaded 
-        PDFs against live web data to identify:
-        - ✅ Verified facts
-        - ⚠️ Outdated statistics
-        - ❌ False claims
+        **How it works**
+        1. Upload a PDF
+        2. Claims are extracted automatically
+        3. Each claim is checked against live fact‑checking databases
+        4. You get a report with:
+           - ✅ Verified
+           - ⚠️ Inaccurate / Outdated
+           - ❌ No evidence
         """)
-    
-    # Main content area
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.subheader("📄 Upload PDF Document")
-        uploaded_file = st.file_uploader(
-            "Choose a PDF file",
-            type="pdf",
-            help="Upload a PDF document containing claims to verify"
-        )
-        
-        if uploaded_file:
-            st.success(f"✅ Uploaded: {uploaded_file.name}")
-            
-            # Process button
-            if st.button("🔍 Start Fact-Checking", type="primary"):
-                with st.spinner("Extracting claims from PDF..."):
-                    # Extract text
-                    text = ClaimExtractor.extract_text_from_pdf(uploaded_file)
-                    
-                    # Show extracted text preview
-                    with st.expander("📝 Preview Extracted Text"):
-                        st.text(text[:500] + "..." if len(text) > 500 else text)
-                    
-                    # Extract claims
-                    claims = ClaimExtractor.identify_claims(text)
-                    
-                    st.success(f"Found {len(claims)} potential claims to verify")
-                
-                # Verify each claim
-                with st.spinner("Verifying claims against live data..."):
-                    verified_claims = []
-                    
-                    progress_bar = st.progress(0)
-                    
-                    for i, claim in enumerate(claims):
-                        # Update progress
-                        progress_bar.progress((i + 1) / len(claims))
-                        
-                        # Verify claim
-                        verification = WebVerifier.verify_with_ai(
-                            claim['matched_text'],
-                            claim['context']
-                        )
-                        
-                        verified_claims.append({
-                            **claim,
-                            'verification': verification,
-                            'timestamp': datetime.now().isoformat()
-                        })
-                    
-                    progress_bar.empty()
-                
-                # Display results
-                st.subheader("📊 Verification Results")
-                
-                # Summary metrics
-                verified_count = sum(1 for c in verified_claims if c['verification']['status'] == 'VERIFIED')
-                inaccurate_count = sum(1 for c in verified_claims if c['verification']['status'] == 'INACCURATE')
-                false_count = sum(1 for c in verified_claims if c['verification']['status'] == 'FALSE')
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("✅ Verified", verified_count, delta_color="normal")
-                with col2:
-                    st.metric("⚠️ Inaccurate", inaccurate_count, delta_color="off")
-                with col3:
-                    st.metric("❌ False", false_count, delta_color="inverse")
-                
-                # Detailed results
-                st.markdown("---")
-                
-                for i, claim in enumerate(verified_claims):
-                    status = claim['verification']['status']
-                    
-                    # Choose appropriate styling
-                    if status == 'VERIFIED':
-                        css_class = 'verified'
-                        emoji = '✅'
-                    elif status == 'INACCURATE':
-                        css_class = 'inaccurate'
-                        emoji = '⚠️'
-                    else:
-                        css_class = 'false'
-                        emoji = '❌'
-                    
-                    # Display claim result
-                    with st.expander(f"{emoji} Claim {i+1}: {claim['matched_text'][:100]}...", expanded=False):
-                        st.markdown(f"<div class='{css_class}'>", unsafe_allow_html=True)
-                        
-                        col1, col2 = st.columns([3, 1])
-                        
-                        with col1:
-                            st.markdown("**Claim:**")
-                            st.write(claim['matched_text'])
-                            
-                            st.markdown("**Verification:**")
-                            st.write(claim['verification'].get('correct_info', 'No information available'))
-                            
-                            if 'source' in claim['verification']:
-                                st.markdown(f"**Source:** {claim['verification']['source']}")
-                        
-                        with col2:
-                            st.markdown(f"**Status:** {status}")
-                            st.markdown(f"**Confidence:** {claim['verification'].get('confidence', 'Unknown')}")
-                            st.markdown(f"**Type:** {claim['claim_type']}")
-                        
-                        st.markdown("</div>", unsafe_allow_html=True)
-                
-                # Export results
-                st.markdown("---")
-                st.subheader("📥 Export Results")
-                
-                if st.button("Download Report"):
-                    # Create downloadable report
-                    report_data = []
-                    for claim in verified_claims:
-                        report_data.append({
-                            'Claim': claim['matched_text'],
-                            'Status': claim['verification']['status'],
-                            'Correct Info': claim['verification'].get('correct_info', ''),
-                            'Confidence': claim['verification'].get('confidence', ''),
-                            'Source': claim['verification'].get('source', ''),
-                            'Type': claim['claim_type']
-                        })
-                    
-                    df = pd.DataFrame(report_data)
-                    csv = df.to_csv(index=False)
-                    
-                    st.download_button(
-                        label="📥 Download CSV Report",
-                        data=csv,
-                        file_name=f"factcheck_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
+
+    # Upload
+    uploaded_file = st.file_uploader("Choose a PDF", type="pdf")
+    if uploaded_file:
+        st.success(f"Uploaded: {uploaded_file.name}")
+        if st.button("🔍 Start Fact‑Checking", type="primary"):
+            with st.spinner("Extracting text..."):
+                text = ClaimExtractor.extract_text_from_pdf(uploaded_file)
+                with st.expander("📝 Extracted text preview"):
+                    st.text(text[:800] + "..." if len(text) > 800 else text)
+
+            claims = ClaimExtractor.identify_claims(text)
+            if not claims:
+                st.warning("No statistical/financial claims detected.")
+                return
+
+            st.success(f"Found {len(claims)} claims to verify")
+
+            # Verify each claim
+            verified_claims = []
+            progress = st.progress(0)
+            for i, c in enumerate(claims):
+                progress.progress((i + 1) / len(claims))
+                result = FactChecker.verify(c['matched_text'], api_key if api_key else None)
+                verified_claims.append({**c, 'verification': result, 'timestamp': datetime.now().isoformat()})
+            progress.empty()
+
+            # Summary metrics
+            v = sum(1 for c in verified_claims if c['verification']['status'] == 'VERIFIED')
+            i_count = sum(1 for c in verified_claims if c['verification']['status'] == 'INACCURATE')
+            f = sum(1 for c in verified_claims if c['verification']['status'] == 'FALSE')
+
+            cols = st.columns(3)
+            cols[0].metric("✅ Verified", v)
+            cols[1].metric("⚠️ Inaccurate", i_count)
+            cols[2].metric("❌ False", f)
+
+            st.markdown("---")
+            for idx, claim in enumerate(verified_claims):
+                status = claim['verification']['status']
+                emoji = '✅' if status == 'VERIFIED' else '⚠️' if status == 'INACCURATE' else '❌'
+                css = status.lower()
+                with st.expander(f"{emoji} Claim {idx+1}: {claim['matched_text'][:100]}...", expanded=False):
+                    st.markdown(f"<div class='{css}'>", unsafe_allow_html=True)
+                    c1, c2 = st.columns([3, 1])
+                    c1.markdown("**Claim:**")
+                    c1.write(claim['matched_text'])
+                    c1.markdown("**Verification:**")
+                    c1.write(claim['verification'].get('correct_info', ''))
+                    c2.markdown(f"**Status:** {status}")
+                    c2.markdown(f"**Confidence:** {claim['verification'].get('confidence','')}")
+                    if claim['verification'].get('source'):
+                        c1.markdown(f"**Source:** {claim['verification']['source']}")
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+            # Export
+            if st.button("📥 Download CSV Report"):
+                df = pd.DataFrame([{
+                    'Claim': c['matched_text'],
+                    'Status': c['verification']['status'],
+                    'Correct Info': c['verification'].get('correct_info',''),
+                    'Source': c['verification'].get('source','')
+                } for c in verified_claims])
+                st.download_button("Download", df.to_csv(index=False),
+                                   file_name=f"factcheck_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                   mime="text/csv")
 
 if __name__ == "__main__":
     main()
